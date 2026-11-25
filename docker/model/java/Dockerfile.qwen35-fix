@@ -1,0 +1,11 @@
+# Fast repair of the already-installed verifier image. Full clean builds use Dockerfile.
+FROM java-verifier:v1.0
+COPY corporate-ca-bundle.pem /etc/ssl/certs/corporate-ca-bundle.pem
+COPY scripts/install_java_ca.py /tmp/install_java_ca.py
+RUN python3 /tmp/install_java_ca.py /etc/ssl/certs/corporate-ca-bundle.pem
+COPY verifier/llm/llm_base.py /app/verifier/llm/llm_base.py
+COPY verifier/evaluator/language_handler/java.py /app/verifier/evaluator/language_handler/java.py
+COPY verify_xml.py /app/verify_xml.py
+COPY verifier/llm/openai.py /app/verifier/llm/openai.py
+COPY verifier/evaluator/language_handler/base.py /app/verifier/evaluator/language_handler/base.py
+COPY verifier/tester/function.py /app/verifier/tester/function.py
