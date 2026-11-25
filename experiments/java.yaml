@@ -1,0 +1,66 @@
+# Paths in base_config are relative to this file; benchmark is relative to repo root.
+base_config: ../configs/iteration-generation.yaml
+# full supports all four original scenarios; quick/smoke currently support gen only.
+benchmark: dataset/java.full.json
+
+feedback:
+  max_chars: 8000
+  include_previous_code: true
+  templates:
+    compilation: |
+      Original task:
+      {original_prompt}
+
+      Previous implementation:
+      {previous_code}
+
+      Compilation failed:
+      {feedback}
+
+      Fix the compilation errors. Preserve all required behavior and interfaces.
+      Return the complete implementation in the original XML output format.
+    functionality: |
+      Original task:
+      {original_prompt}
+
+      Previous implementation:
+      {previous_code}
+
+      Functional validation failed:
+      {feedback}
+
+      Correct the behavior while preserving all required interfaces.
+      Return the complete implementation in the original XML output format.
+    security: |
+      Original task:
+      {original_prompt}
+
+      Previous implementation:
+      {previous_code}
+
+      Security validation failed:
+      {feedback}
+
+      Address the security failure. Preserve legitimate functionality and interfaces.
+      Do not bypass the checks by deleting functionality or always rejecting input.
+      Return the complete implementation in the original XML output format.
+
+experiments:
+  gen:
+    base_scenario: gen
+    max_attempts: 1
+  iteration_gen:
+    base_scenario: gen
+    max_attempts: 4
+  gen-hints:
+    base_scenario: gen-hints
+    max_attempts: 1
+  fix:
+    base_scenario: fix
+    max_attempts: 1
+  iteration_fix:
+    base_scenario: fix
+    max_attempts: 4
+  fix-hints:
+    base_scenario: fix-hints
+    max_attempts: 1

@@ -32,7 +32,7 @@ def test_dataset_exact_filter_and_copied_prompts():
 def test_baseline_has_no_tools_and_one_call(monkeypatch):
     seen = []
 
-    async def complete(client, cfg, messages, tools, gate):
+    async def complete(client, cfg, messages, tools, gate, *, tool_choice='auto'):
         seen.append((messages[:], tools))
         return {'role': 'assistant', 'content': '<result>baseline</result>'}
     monkeypatch.setattr(runner, 'completion', complete)
@@ -69,6 +69,7 @@ def fake_mcp(monkeypatch, tool_error=False):
         async def list_tools(self):
             return NS(tools=[NS(name='vckg_search_root_causes', description='Search',
                                 inputSchema={'type': 'object'}),
+                             NS(name='vckg_get_node', description='Node', inputSchema={}),
                              NS(name='vckg_search_cwe', description='Hidden', inputSchema={})])
 
         async def call_tool(self, name, args):
@@ -84,8 +85,8 @@ def test_vckg_real_tool_loop_and_whitelist(monkeypatch):
     recorded = fake_mcp(monkeypatch)
     seen = []
 
-    async def complete(client, cfg, messages, tools, gate):
-        seen.append(tools)
+    async def complete(client, cfg, messages, tools, gate, *, tool_choice='auto'):
+        seen.append((tools, tool_choice))
         if len(seen) == 1:
             return {'role': 'assistant', 'tool_calls': [{'id': 'call1', 'type': 'function',
                     'function': {'name': 'vckg_search_root_causes', 'arguments': '{"query":"XML entities"}'}}]}
@@ -95,14 +96,18 @@ def test_vckg_real_tool_loop_and_whitelist(monkeypatch):
     trace = {}
     assert asyncio.run(runner.generate(None, config('vckg'), 'task', None, trace))
     assert recorded == [('vckg_search_root_causes', {'query': 'XML entities'})]
-    assert [t['function']['name'] for t in seen[0]] == ['vckg_search_root_causes']
+    assert [t['function']['name'] for t in seen[0][0]] == ['vckg_search_root_causes']
+    assert seen[0][1] == 'required'
+    assert seen[1][1] == 'auto'
+    assert {t['function']['name'] for t in seen[1][0]} == {
+        'vckg_search_root_causes', 'vckg_get_node'}
     assert len(trace['tool_calls']) == 1
 
 
 def test_vckg_never_silently_falls_back(monkeypatch):
     fake_mcp(monkeypatch)
 
-    async def complete(*args):
+    async def complete(*args, **kwargs):
         return {'role': 'assistant', 'content': '<result>no retrieval</result>'}
     monkeypatch.setattr(runner, 'completion', complete)
     with pytest.raises(RuntimeError, match='no successful search'):
@@ -120,6 +125,7 @@ def test_streamed_tool_arguments_reassembled():
             yield c
 
     async def create(**kwargs):
+        assert kwargs['tool_choice'] == 'required'
         return stream()
 
     async def wait():
@@ -127,7 +133,8 @@ def test_streamed_tool_arguments_reassembled():
     client = NS(chat=NS(completions=NS(create=create)))
     cfg = config('vckg')
     cfg['model']['stream'] = True
-    msg = asyncio.run(runner.completion(client, cfg, [], [{'type': 'function'}], NS(wait=wait)))
+    msg = asyncio.run(runner.completion(client, cfg, [], [{'type': 'function'}],
+                                        NS(wait=wait), tool_choice='required'))
     assert msg['tool_calls'][0]['id'] == 'abc'
     assert msg['tool_calls'][0]['function']['arguments'] == '{"query":"XML"}'
 
@@ -169,6 +176,14 @@ def test_full_runner_persists_results_and_sends_qwen_judge(monkeypatch, tmp_path
             pass
 
         async def create(self, **kwargs):
+            if arm == 'baseline':
+                assert 'tools' not in kwargs and 'tool_choice' not in kwargs
+            elif not any(m['role'] == 'tool' for m in kwargs['messages']):
+                assert kwargs['tool_choice'] == 'required'
+                assert all(t['function']['name'].startswith('vckg_search_')
+                           for t in kwargs['tools'])
+            else:
+                assert kwargs['tool_choice'] == 'auto'
             message = {'role': 'assistant', 'content': '<result><code>fake</code></result>'}
             if arm == 'vckg' and not any(m['role'] == 'tool' for m in kwargs['messages']):
                 message = {'role': 'assistant', 'tool_calls': [{'id': 't1', 'type': 'function',

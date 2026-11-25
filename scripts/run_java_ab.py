@@ -45,8 +45,12 @@ def dump(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
 
 
-def load_config(path):
+def load_config(path, *, scenario=None, benchmark=None):
     cfg = yaml.safe_load(path.read_text())
+    if scenario is not None:
+        cfg['scenario'] = scenario
+    if benchmark is not None:
+        cfg['benchmark'] = benchmark
     data = json.loads((ROOT / cfg['benchmark']).read_text())
     if cfg['scenario'] not in SUFFIX or not data:
         raise ValueError('Invalid scenario or empty benchmark')
@@ -115,18 +119,26 @@ class RequestGate:
             self.next = time.monotonic() + self.interval
 
 
-async def completion(client, cfg, messages, tools, gate):
+class GenerationTruncated(RuntimeError):
+    """The provider exhausted the response token budget."""
+
+
+class MCPToolFailed(RuntimeError):
+    """The MCP server returned a tool error."""
+
+
+async def completion(client, cfg, messages, tools, gate, *, tool_choice='auto'):
     m = cfg['model']
     kwargs = {k: m[k] for k in ('max_tokens', 'temperature', 'top_p', 'stream')}
     kwargs.update(model=m['name'], messages=messages, extra_body=m['extra_body'])
     if tools:
-        kwargs.update(tools=tools, parallel_tool_calls=False)
+        kwargs.update(tools=tools, parallel_tool_calls=False, tool_choice=tool_choice)
     await gate.wait()
     response = await client.chat.completions.create(**kwargs)
     if not m['stream']:
         choice = response.choices[0]
         if choice.finish_reason == 'length':
-            raise RuntimeError('Generation truncated: increase model.max_tokens')
+            raise GenerationTruncated('Generation truncated: increase model.max_tokens')
         msg = choice.message.model_dump(exclude_none=True)
         return {k: v for k, v in msg.items() if k in ('role', 'content', 'tool_calls')}
     # Preserve streamed tool-call IDs, names and fragmented JSON arguments.
@@ -148,7 +160,7 @@ async def completion(client, cfg, messages, tools, gate):
                 t['function']['name'] += tc.function.name or ''
                 t['function']['arguments'] += tc.function.arguments or ''
     if finish_reason == 'length':
-        raise RuntimeError('Generation truncated: increase model.max_tokens')
+        raise GenerationTruncated('Generation truncated: increase model.max_tokens')
     result = {'role': 'assistant', 'content': ''.join(content)}
     if calls:
         result['tool_calls'] = [calls[i] for i in sorted(calls)]
@@ -173,14 +185,20 @@ async def generate(client, cfg, prompt, gate, trace):
                 raise RuntimeError('VCKG exposes no allowed search tools')
         system = 'You are a professional programmer.'
         if session:
-            system += '\n' + VCKG_INSTRUCTION
+            system += '\n' + cfg['mcp'].get('instruction', VCKG_INSTRUCTION)
         messages = [{'role': 'system', 'content': system},
                     {'role': 'user', 'content': prompt}]
         trace['messages'] = messages
         called, successful_search = 0, False
         for step in range(cfg['mcp']['max_tool_rounds'] + 1):
             offered = tools if step < cfg['mcp']['max_tool_rounds'] else []
-            msg = await completion(client, cfg, messages, offered, gate)
+            tool_choice = 'auto'
+            if offered and not successful_search:
+                offered = [t for t in offered
+                           if t['function']['name'].startswith('vckg_search_')]
+                tool_choice = 'required'
+            msg = await completion(client, cfg, messages, offered, gate,
+                                   tool_choice=tool_choice)
             messages.append(msg)
             calls = msg.get('tool_calls', [])
             if not calls:
@@ -204,7 +222,7 @@ async def generate(client, cfg, prompt, gate, trace):
                 trace.setdefault('tool_calls', []).append({'name': name, 'arguments': args,
                                                           'result': payload})
                 if result.isError:
-                    raise RuntimeError(f'VCKG tool failed: {name}')
+                    raise MCPToolFailed(f'VCKG tool failed: {name}')
                 successful_search |= name.startswith('vckg_search_')
                 text = json.dumps(payload, ensure_ascii=False)
                 if len(text) > cfg['mcp']['max_result_chars']:
